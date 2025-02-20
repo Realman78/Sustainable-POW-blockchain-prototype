@@ -6,7 +6,7 @@ function isPrime(num) {
     return true;
 }
 
-function nextPrime(N) {
+export function nextPrime(N) {
     let candidate = N + 1;
     while (!isPrime(candidate)) {
         candidate++;

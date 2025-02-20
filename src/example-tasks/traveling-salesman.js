@@ -1,4 +1,4 @@
-function tspBruteForce(distances) {
+export function tspBruteForce(distances) {
     const cities = Array.from({ length: distances.length }, (_, i) => i);
 
     function permute(arr, prefix = []) {

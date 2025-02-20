@@ -8,4 +8,5 @@ function discreteLogarithm(g, h, p, multi = 1) {
     return -1;
 }
 
+module.exports = { discreteLogarithm };
 // console.log(discreteLogarithm(2, 8, 13)); // output: 3 (2^3 % 13 = 8)

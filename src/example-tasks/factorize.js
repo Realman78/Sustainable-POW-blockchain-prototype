@@ -1,4 +1,3 @@
-// return prime factors of a number
 function factorize(N) {
     const factors = [];
     let divisor = 2;
@@ -16,4 +15,5 @@ function factorize(N) {
 
 console.log(factorize(process.argv[2]));
 
+module.exports = { factorize };
 // console.log(factorize(60)); // [2, 2, 3, 5]
