@@ -12,5 +12,5 @@ const PREDEFINED_WALLETS = {
   const blockchain = new Blockchain(PREDEFINED_WALLETS, process.argv[4]);
   const walletId = process.argv[2]; // node client.js wallet1
   const port = process.argv[3];
-  const p2pServer = new P2PServer(blockchain, port, walletId);
+  const p2pServer = new P2PServer(blockchain, port, walletId, process.argv[4]);
   p2pServer.listen();

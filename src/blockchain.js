@@ -48,12 +48,13 @@ class Transaction {
 }
 
 class Block {
-  constructor(timestamp, transactions, previousHash = '') {
+  constructor(timestamp, transactions, computationResults, previousHash = '', hash = '') {
     this.previousHash = previousHash;
     this.timestamp = timestamp;
     this.transactions = transactions;
     this.nonce = 0;
-    this.hash = this.calculateHash();
+    this.hash = hash || this.calculateHash();
+    this.computationResults = computationResults || [];
   }
 
   calculateHash() {
@@ -63,16 +64,22 @@ class Block {
         this.previousHash +
         this.timestamp +
         JSON.stringify(this.transactions) +
+        JSON.stringify(this.computationResults) +
         this.nonce
       )
       .digest('hex');
   }
 
-  async mineBlock(difficulty, delayed) {
+  async mineBlock(difficulty, delayed, isCancelled) {
     console.log("Mining block...", this.hash)
     while (
       this.hash.substring(0, difficulty) !== Array(difficulty + 1).join('0')
     ) {
+      // Check if mining should be cancelled
+      if (isCancelled?.()) {
+        throw new Error('Mining terminated');
+      }
+
       this.nonce++;
       this.hash = this.calculateHash();
       if (delayed) {
@@ -96,10 +103,13 @@ class Block {
 }
 
 class Blockchain {
-  constructor(initialWallets, delayed=false) {
+  constructor(initialWallets, delayed = false) {
     this.chain = [this.createGenesisBlock(initialWallets)];
-    this.difficulty = 3;
+    this.difficulty = 5;
     this.pendingTransactions = [];
+    this.pendingCalculations = [];
+    this.completedCalculations = [];
+    this.temporaryResults = [];
     this.miningReward = 100;
     this.delayed = delayed;
     console.log(this.delayed)
@@ -109,14 +119,14 @@ class Blockchain {
     const genesisTransactions = Object.entries(initialWallets).map(([wallet, amount]) =>
       new Transaction(null, wallet, parseInt(amount))
     );
-    return new Block(Date.parse('2025-01-01'), genesisTransactions, '0');
+    return new Block(Date.parse('2025-01-01'), genesisTransactions, [], '0', 'GENESIS_MARINCOIN');
   }
 
   getLatestBlock() {
     return this.chain[this.chain.length - 1];
   }
 
-  async minePendingTransactions(miningRewardAddress) {
+  defineBlock(miningRewardAddress) {
     const rewardTx = new Transaction(
       null,
       miningRewardAddress,
@@ -127,8 +137,14 @@ class Blockchain {
     const block = new Block(
       Date.now(),
       this.pendingTransactions,
+      this.pendingCalculations,
       this.getLatestBlock().hash
     );
+    return block;
+  }
+
+  async minePendingTransactions(miningRewardAddress) {
+    const block = defineBlock(miningRewardAddress);
     await block.mineBlock(this.difficulty, this.delayed);
 
     if (block.previousHash !== this.getLatestBlock().hash) {
@@ -149,9 +165,24 @@ class Blockchain {
   }
 
   isValidBlock(block) {
-    console.log("IS BLOCK VALID")
+    console.log("IS BLOCK VALID", block, this.getLatestBlock())
+    console.log("validno", block.previousHash === this.getLatestBlock().hash && block.computationResults.every((res) => {
+      const {executable, args, output} = res;
+      if (executable === 'discreteLog') {
+        return discreteLogarithm(...args) === output;
+      } else if (executable === 'factorize') {
+        return factorize(...args).reduce((acc, curr) => acc * curr, 1) === output;
+      }
+    }));
     return (
-      block.previousHash === this.getLatestBlock().hash
+      block.previousHash === this.getLatestBlock().hash && block.computationResults.every((res) => {
+        const {executable, args, output} = res;
+        if (executable === 'discreteLog') {
+          return discreteLogarithm(...args) === output;
+        } else if (executable === 'factorize') {
+          return factorize(...args).reduce((acc, curr) => acc * curr, 1) === output;
+        }
+      })
     );
   }
 
@@ -210,7 +241,7 @@ class Blockchain {
       }
     }
 
-    console.log('getBalanceOfAdrees: %s', balance);
+    console.log('getBalanceOfAddress: %s', balance);
     return balance;
   }
 
