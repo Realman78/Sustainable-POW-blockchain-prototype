@@ -46,10 +46,9 @@ class P2PServer {
 
   async mineLoop() {
     while (this.mining) {
-      if (this.blockchain.mempool.transactions.size > 0 || this.blockchain.pendingCalculations.length > 0) {
+      if (this.blockchain.mempool.transactions.size > 0) {
         try {
           const blockData = this.blockchain.defineBlock(this.walletId, [], []);
-          this.blockchain.mempool.transactions = [];
 
           if (this.blockchain.pendingCalculations && this.blockchain.pendingCalculations.length > 0) {
             await new Promise(async (resolve, reject) => {
@@ -68,9 +67,9 @@ class P2PServer {
                 if (message.status === 'DONE' && message.taskId &&
                   message.output) {
                   console.log('Calculated successfully!', message.output);
-                  console.log('Calculated LARINPARIN!', {output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId)});
+                  console.log('Calculated LARINPARIN!', { output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId) });
 
-                  blockData.computationResults.push({output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId)});
+                  blockData.computationResults.push({ output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId) });
                 } else if (message.status === 'aborted') {
                   console.log('Calculation aborted.');
                 }
@@ -96,56 +95,65 @@ class P2PServer {
             this.blockchain.pendingCalculations = [];
           }
 
-          // Wrap worker logic in a promise to synchronize the loop
-          await new Promise((resolve, reject) => {
-            console.log("Creating worker...");
-            this.worker = new Worker('./src/miner.js');
+          if (this.blockchain.mempool.transactions.size > 0) {
+            await new Promise((resolve, reject) => {
+              console.log("Creating worker...");
+              this.worker = new Worker('./src/miner.js');
 
-            // Send the data to the worker
-            this.worker.postMessage({
-              blockData,
-              difficulty: this.blockchain.difficulty,
-              delayed: this.delayed
-            });
+              // Send the data to the worker
+              this.worker.postMessage({
+                blockData,
+                difficulty: this.blockchain.difficulty,
+                delayed: this.delayed
+              });
 
 
-            this.worker.on('message', (message) => {
-              console.log("ALOOOOOO")
-              if (message.status === 'mined') {
-                console.log('Block mined successfully!', message.block);
+              this.worker.on('message', (message) => {
+                if (message.status === 'mined') {
+                  console.log('Block mined successfully!', message.block);
 
-                if (message.block.previousHash !== this.blockchain.getLatestBlock().hash) {
-                  return reject(new Error('Block already mined'));
+                  if (message.block.previousHash !== this.blockchain.getLatestBlock().hash) {
+                    return reject(new Error('Block already mined'));
+                  }
+
+                  // Add the mined block to the blockchain
+                  if (this.blockchain.addBlock(message.block)) {
+                    this.broadcastBlock(message.block);
+                    // Reconstruct transactions to get proper Transaction objects
+                    message.block.transactions.forEach(tx => {
+                      if (tx.fromAddress !== null) { // Skip mining reward
+                        const transaction = new Transaction(tx.fromAddress, tx.toAddress, tx.amount);
+                        transaction.timestamp = tx.timestamp;
+                        transaction.signature = tx.signature;
+                        const txHash = transaction.calculateHash();
+                        this.blockchain.mempool.transactions.delete(txHash);
+                      }
+                    });
+                  }
+
+                } else if (message.status === 'aborted') {
+                  console.log('Mining aborted due to a new block.');
                 }
+                this.worker && this.worker.terminate();
+                this.worker = null;
+                resolve();
+              });
 
-                // Add the mined block to the blockchain
-                if (this.blockchain.addBlock(message.block)) {
-                  this.broadcastBlock(message.block);
-                  this.blockchain.mempool.transactions = [];
-                }
-              } else if (message.status === 'aborted') {
-                console.log('Mining aborted due to a new block.');
-              }
-              this.worker && this.worker.terminate();
-              this.worker = null;
-              resolve();
+              this.worker.on('error', (error) => {
+                console.error('Worker error:', error);
+                this.worker.terminate();
+                this.worker = null;
+                reject(error);
+              });
+
+              this.worker.on('exit', (code) => {
+                if (code !== 0) console.error(`Worker stopped with exit code ${code}`);
+                this.worker = null;
+                resolve();
+              });
             });
+          }
 
-            this.worker.on('error', (error) => {
-              console.error('Worker error:', error);
-              this.worker.terminate();
-              this.worker = null;
-              reject(error);
-            });
-
-            this.worker.on('exit', (code) => {
-              console.log("ALOOOOOO222")
-
-              if (code !== 0) console.error(`Worker stopped with exit code ${code}`);
-              this.worker = null;
-              resolve();
-            });
-          });
         } catch (error) {
           if (error.message === 'Block already mined') {
             console.log(error.message);
@@ -169,10 +177,9 @@ class P2PServer {
     socket.send(JSON.stringify({
       type: 'calculations',
       calculations: {
-        pending: this.blockchain.pendingCalculations,
-        completed: this.blockchain.completedCalculations,
-        temporary: this.blockchain.temporaryResults
-      },
+        pending: Array.from(this.blockchain.computationManager.pendingTasks.values()),
+        completed: Array.from(this.blockchain.computationManager.completedTasks.values())
+      }
     }));
   }
 
@@ -255,12 +262,33 @@ class P2PServer {
     this.knownMessages.add(messageId);
     this.broadcast(message);
   }
-
   handleNewBlock(block) {
     console.log("Received new block", block);
     if (this.blockchain.addBlock(block)) {
+      // Get all transaction hashes from mempool first
+      const mempoolTxs = Array.from(this.blockchain.mempool.transactions.values())
+        .map(txData => txData.transaction);
+
+      // For each transaction in the new block
+      block.transactions.forEach(blockTx => {
+        if (blockTx.fromAddress !== null) { // Skip mining reward
+          // Find matching transaction in mempool
+          const matchingTx = mempoolTxs.find(mempoolTx =>
+            mempoolTx.fromAddress === blockTx.fromAddress &&
+            mempoolTx.toAddress === blockTx.toAddress &&
+            mempoolTx.amount === blockTx.amount
+          );
+
+          if (matchingTx) {
+            const txHash = matchingTx.calculateHash();
+            console.log("Removing tx from mempool:", txHash, this.blockchain.mempool.transactions.has(txHash));
+            this.blockchain.mempool.transactions.delete(txHash);
+          }
+        }
+      });
+
       if (this.mining && this.worker) {
-        this.mining = false;  // Stop the mining loop
+        this.mining = false;
         this.worker.terminate();
         this.worker = null;
 
@@ -279,7 +307,7 @@ class P2PServer {
         transaction.amount
       );
       tx.signature = transaction.signature;
-      this.blockchain.addTransactionToMempool(tx);
+      this.blockchain.addTransactionToMempool(tx, tx.timestamp);
     } catch (e) {
       console.error('Invalid transaction:', e);
     }
@@ -354,22 +382,33 @@ class P2PServer {
     }
   }
   handleCalculationsSync(calculations) {
-    console.log('Received calculations');
-    const { pending, completed, temporary } = calculations;
-    if (pending.length > this.blockchain.pendingCalculations.length) {
-      this.blockchain.pendingCalculations = pending;
+    console.log('Received calculations', calculations);
+    const { pending, completed } = calculations;
+    for (const task of pending) {
+      if (!this.blockchain.computationManager.isTaskPending(task.taskId)) {
+        this.blockchain.computationManager.addTask(task);
+      }
     }
-    if (completed.length > this.blockchain.completedCalculations.length) {
-      this.blockchain.completedCalculations = completed;
-    }
-    if (temporary.length > this.blockchain.temporaryResults.length) {
-      this.blockchain.temporaryResults = temporary;
+    // Add completed tasks we don't have
+    for (const result of completed) {
+      if (!this.blockchain.computationManager.isTaskCompleted(result.taskId)) {
+        this.blockchain.computationManager.addCompletedTask(result);
+      }
     }
   }
+
   handlePendingCalculationsSync(calculations) {
-    console.log('Received pending calculations');
-    if (calculations.length > this.blockchain.pendingCalculations.length) {
-      this.blockchain.pendingCalculations = calculations;
+    console.log('Received pending calculations', calculations);
+
+    // Add each received calculation if we don't already have it
+    for (const task of calculations) {
+      if (!this.blockchain.computationManager.isTaskPending(task.taskId)) {
+        try {
+          this.blockchain.computationManager.addTask(task, task.addedAt);
+        } catch (error) {
+          console.error('Error adding task:', error);
+        }
+      }
     }
   }
 
@@ -394,27 +433,27 @@ class P2PServer {
     });
   }
 
-  broadcastCalculations() {
-    const message = JSON.stringify({
-      type: 'calculations',
-      calculations: {
-        pending: this.blockchain.pendingCalculations,
-        completed: this.blockchain.completedCalculations
-      }
-    });
-    this.broadcast(message);
-  }
+  // broadcastCalculations() {
+  //   const message = JSON.stringify({
+  //     type: 'calculations',
+  //     calculations: {
+  //       pending: Array.from(this.blockchain.computationManager.pendingTasks.values()),
+  //       completed: Array.from(this.blockchain.computationManager.completedTasks.values())
+  //     }
+  //   });
+  //   this.broadcast(message);
+  // }
 
   broadcastPendingCalculations() {
     const message = JSON.stringify({
       type: 'pending_calculations',
-      pendingCalculations: this.blockchain.pendingCalculations,
+      pendingCalculations: Array.from(this.blockchain.computationManager.pendingTasks.values())
     });
     this.broadcast(message);
   }
 
   addToPendingCalculations(calculation) {
-    this.blockchain.pendingCalculations.push(calculation);
+    this.blockchain.computationManager.addTask(calculation);
     this.broadcastPendingCalculations();
   }
 
@@ -461,8 +500,12 @@ class P2PServer {
               console.log(JSON.stringify(this.blockchain.chain, null, 2));
               break;
             case 'calcs':
-              console.log(JSON.stringify(this.blockchain.pendingCalculations, null, 2));
-              console.log(JSON.stringify(this.blockchain.completedCalculations, null, 2));
+              console.log(this.blockchain.computationManager);
+              // console.log(JSON.stringify(this.blockchain.completedCalculations, null, 2));
+              break;
+            case 'mempool':
+              console.log(this.blockchain.mempool);
+              // console.log(JSON.stringify(this.blockchain.completedCalculations, null, 2));
               break;
 
             case 'compute':

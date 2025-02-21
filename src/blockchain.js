@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const EC = require('elliptic').ec;
 const ec = new EC('secp256k1');
 const MempoolManager = require('./mempool-manager');
+const ComputationManager = require('./computation-manager');
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -111,12 +112,9 @@ class Blockchain {
     this.initialWallets = initialWallets;
     this.chain = [this.createGenesisBlock(initialWallets)];
     this.difficulty = 5;
-    this.pendingTransactions = [];
-    this.pendingCalculations = [];
-    this.completedCalculations = [];
-    this.temporaryResults = [];
     this.miningReward = 100;
     this.delayed = delayed;
+
     this.mempool = new MempoolManager({
       maxSize: 5000,
       expiryTime: 3600000 // 1 hour
@@ -125,6 +123,19 @@ class Blockchain {
     setInterval(() => {
       this.mempool.cleanExpiredTransactions();
     }, 300000); // Clean every 5 minutes
+
+    this.computationManager = new ComputationManager({
+      maxPendingTasks: 100,
+      taskTimeout: 300000
+    });
+    setInterval(() => {
+      console.log("Clearing expired tasks");
+      this.computationManager.cleanExpiredTasks();
+    }, 60000);
+  }
+
+  addComputationTask(task) {
+    this.computationManager.addTask(task);
   }
 
   createGenesisBlock(initialWallets) {
@@ -145,15 +156,15 @@ class Blockchain {
       this.miningReward
     );
 
-    // Get transactions from mempool instead of pendingTransactions
     const maxBlockSize = 1000000; // 1MB block size limit
     const transactions = this.mempool.getTransactionsForBlock(maxBlockSize);
     transactions.push(rewardTx);
+    const pendingTasks = this.computationManager.getTasksForBlock(5); // Get up to 5 tasks
 
     const block = new Block(
       Date.now(),
       transactions,
-      this.pendingCalculations,
+      pendingTasks,
       this.getLatestBlock().hash
     );
 
@@ -164,23 +175,13 @@ class Blockchain {
     return block;
   }
 
-  async minePendingTransactions(miningRewardAddress) {
-    const block = defineBlock(miningRewardAddress);
-    await block.mineBlock(this.difficulty, this.delayed);
-
-    if (block.previousHash !== this.getLatestBlock().hash) {
-      throw new Error('Block already mined');
-    }
-    this.chain.push(block);
-
-    this.pendingTransactions = [];
-    return block;
-  }
-
   addBlock(block) {
     if (this.isValidBlock(block)) {
       this.chain.push(block);
       return true;
+    }
+    for (const result of block.computationResults) {
+      this.computationManager.addCompletedTask(result);
     }
     return false;
   }
@@ -261,6 +262,19 @@ class Blockchain {
       return false;
     }
 
+    for (const result of blockData.computationResults) {
+      const task = this.computationManager.pendingTasks.get(result.taskId);
+      if (!task) {
+        console.log("Unknown computation task");
+        return false;
+      }
+
+      if (!this.computationManager.verifyResult(task, result)) {
+        console.log("Invalid computation result");
+        return false;
+      }
+    }
+
     return true;
   }
 
@@ -300,7 +314,7 @@ class Blockchain {
 
     // If all checks pass, add to mempool
     this.mempool.addTransaction(transaction);
-    console.log('Transaction added to mempool:', txHash);
+    console.log('Transaction added to mempool:', txHash, this.mempool);
   }
 
   getBalanceOfAddress(address) {

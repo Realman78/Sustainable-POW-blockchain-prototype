@@ -5,7 +5,7 @@ class MempoolManager {
       this.transactions = new Map(); // txHash -> {transaction, timestamp, fee}
     }
   
-    addTransaction(transaction) {
+    addTransaction(transaction, timestamp = Date.now()) {
       // Calculate transaction size and fee
       const txSize = this.calculateTransactionSize(transaction);
       const fee = this.calculateTransactionFee(transaction);
@@ -19,10 +19,11 @@ class MempoolManager {
       const txHash = transaction.calculateHash();
       this.transactions.set(txHash, {
         transaction,
-        timestamp: Date.now(),
+        timestamp,
         fee,
         size: txSize
       });
+      console.log("dodano", this.transactions);
     }
   
     removeLowestFeeTransactions() {
@@ -82,10 +83,12 @@ class MempoolManager {
   
     removeTransactions(transactions) {
       for (const tx of transactions) {
-        const txHash = tx.calculateHash();
-        this.transactions.delete(txHash);
+          const txHash = tx.calculateHash();
+          console.log("Attempting to remove transaction:", txHash);
+          const removed = this.transactions.delete(txHash);
+          console.log("Transaction removed:", removed);
       }
-    }
+  }
   }
   
   module.exports = MempoolManager;
