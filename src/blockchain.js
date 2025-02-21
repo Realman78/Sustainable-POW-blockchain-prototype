@@ -2,7 +2,7 @@
 const crypto = require('crypto');
 const EC = require('elliptic').ec;
 const ec = new EC('secp256k1');
-
+const MempoolManager = require('./mempool-manager');
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -18,7 +18,12 @@ class Transaction {
   calculateHash() {
     return crypto
       .createHash('sha256')
-      .update(this.fromAddress + this.toAddress + this.amount + this.timestamp)
+      .update(
+        (this.fromAddress || '') + 
+        (this.toAddress || '') + 
+        (this.amount?.toString() || '0') + 
+        (this.timestamp?.toString() || Date.now().toString())
+      )
       .digest('hex');
   }
 
@@ -31,7 +36,6 @@ class Transaction {
     // const sig = signingKey.sign(hashTx, 'base64');
 
     this.signature = signingKey;
-    console.log(this.signature)
   }
 
   isValid() {
@@ -104,6 +108,7 @@ class Block {
 
 class Blockchain {
   constructor(initialWallets, delayed = false) {
+    this.initialWallets = initialWallets;
     this.chain = [this.createGenesisBlock(initialWallets)];
     this.difficulty = 5;
     this.pendingTransactions = [];
@@ -112,7 +117,14 @@ class Blockchain {
     this.temporaryResults = [];
     this.miningReward = 100;
     this.delayed = delayed;
-    console.log(this.delayed)
+    this.mempool = new MempoolManager({
+      maxSize: 5000,
+      expiryTime: 3600000 // 1 hour
+    });
+
+    setInterval(() => {
+      this.mempool.cleanExpiredTransactions();
+    }, 300000); // Clean every 5 minutes
   }
 
   createGenesisBlock(initialWallets) {
@@ -132,14 +144,23 @@ class Blockchain {
       miningRewardAddress,
       this.miningReward
     );
-    this.pendingTransactions.push(rewardTx);
+
+    // Get transactions from mempool instead of pendingTransactions
+    const maxBlockSize = 1000000; // 1MB block size limit
+    const transactions = this.mempool.getTransactionsForBlock(maxBlockSize);
+    transactions.push(rewardTx);
 
     const block = new Block(
       Date.now(),
-      this.pendingTransactions,
+      transactions,
       this.pendingCalculations,
       this.getLatestBlock().hash
     );
+
+    // Don't remove transactions here!
+    // They should only be removed after successful mining and block addition
+    // The removal should happen in the mining loop after blockchain.addBlock() succeeds
+
     return block;
   }
 
@@ -163,31 +184,88 @@ class Blockchain {
     }
     return false;
   }
+  isValidBlock(blockData) {
+    // First reconstruct the Block and Transaction objects
+    const transactions = blockData.transactions.map(tx => {
+      const transaction = new Transaction(tx.fromAddress, tx.toAddress, tx.amount);
+      transaction.timestamp = tx.timestamp;
+      transaction.signature = tx.signature;
+      return transaction;
+    });
 
-  isValidBlock(block) {
-    console.log("IS BLOCK VALID", block, this.getLatestBlock())
-    console.log("validno", block.previousHash === this.getLatestBlock().hash && block.computationResults.every((res) => {
-      const {executable, args, output} = res;
-      if (executable === 'discreteLog') {
-        return discreteLogarithm(...args) === output;
-      } else if (executable === 'factorize') {
-        return factorize(...args).reduce((acc, curr) => acc * curr, 1) === output;
-      }
-    }));
-    return (
-      block.previousHash === this.getLatestBlock().hash && block.computationResults.every((res) => {
-        const {executable, args, output} = res;
-        if (executable === 'discreteLog') {
-          return discreteLogarithm(...args) === output;
-        } else if (executable === 'factorize') {
-          return factorize(...args).reduce((acc, curr) => acc * curr, 1) === output;
-        }
-      })
+    const block = new Block(
+      blockData.timestamp,
+      transactions,
+      blockData.computationResults,
+      blockData.previousHash,
+      blockData.hash
     );
+    block.nonce = blockData.nonce;
+
+    // Now proceed with validation
+    // 1. Check if block has all required properties
+    if (!block.previousHash || !block.timestamp || !block.transactions || !block.hash) {
+      console.log("Block missing required properties");
+      return false;
+    }
+
+    // 2. Verify block links to our latest block
+    if (block.previousHash !== this.getLatestBlock().hash) {
+      console.log("Block does not link to the latest block");
+      return false;
+    }
+
+    // 3. Verify block hash matches its contents
+    const calculatedHash = block.calculateHash();
+    if (calculatedHash !== block.hash) {
+      console.log("Block hash doesn't match its contents");
+      return false;
+    }
+
+    // 4. Verify proof of work
+    const hashPrefix = Array(this.difficulty + 1).join('0');
+    if (!block.hash.startsWith(hashPrefix)) {
+      console.log("Block hash doesn't meet difficulty requirement");
+      return false;
+    }
+
+    // 5. Verify all transactions in the block
+    for (const tx of block.transactions) {
+      // Skip mining reward transaction
+      if (tx.fromAddress === null) {
+        if (tx.amount !== this.miningReward) {
+          console.log("Invalid mining reward amount");
+          return false;
+        }
+        continue;
+      }
+
+      // Verify transaction signature
+      if (!tx.isValid()) {
+        console.log("Block contains invalid transaction");
+        return false;
+      }
+
+      // Verify sender has enough balance
+      const senderBalance = this.getBalanceOfAddress(tx.fromAddress);
+      if (senderBalance < tx.amount) {
+        console.log("Sender doesn't have enough balance");
+        return false;
+      }
+    }
+
+    // 6. Verify mining reward transaction (should be the last transaction)
+    const rewardTx = block.transactions[block.transactions.length - 1];
+    if (rewardTx.fromAddress !== null || rewardTx.amount !== this.miningReward) {
+      console.log("Invalid mining reward transaction");
+      return false;
+    }
+
+    return true;
   }
 
-
   addTransactionToMempool(transaction) {
+    // Basic validation
     if (!transaction.fromAddress || !transaction.toAddress) {
       throw new Error('Transaction must include from and to address');
     }
@@ -200,30 +278,29 @@ class Blockchain {
       throw new Error('Transaction amount should be higher than 0');
     }
 
+    // Check if transaction is already in mempool
+    const txHash = transaction.calculateHash();
+    if (this.mempool.isTransactionInMempool(txHash)) {
+      throw new Error('Transaction already in mempool');
+    }
+
+    // Get current balance
     const walletBalance = this.getBalanceOfAddress(transaction.fromAddress);
-    if (walletBalance < transaction.amount) {
-      throw new Error('Not enough balance');
+
+    // Calculate total pending amount from mempool
+    const pendingAmount = Array.from(this.mempool.transactions.values())
+      .filter(tx => tx.transaction.fromAddress === transaction.fromAddress)
+      .reduce((sum, tx) => sum + tx.transaction.amount, 0);
+
+    // Check if total pending + new transaction exceeds balance
+    const totalAmount = pendingAmount + transaction.amount;
+    if (totalAmount > walletBalance) {
+      throw new Error('Total pending transactions would exceed wallet balance');
     }
 
-    const pendingTxForWallet = this.pendingTransactions.filter(
-      tx => tx.fromAddress === transaction.fromAddress
-    );
-
-    if (pendingTxForWallet.length > 0) {
-      const totalPendingAmount = pendingTxForWallet
-        .map(tx => tx.amount)
-        .reduce((prev, curr) => prev + curr);
-
-      const totalAmount = totalPendingAmount + transaction.amount;
-      if (totalAmount > walletBalance) {
-        throw new Error(
-          'Pending transactions for this wallet is higher than its balance.'
-        );
-      }
-    }
-
-    this.pendingTransactions.push(transaction);
-    console.log('transaction added: %s', transaction);
+    // If all checks pass, add to mempool
+    this.mempool.addTransaction(transaction);
+    console.log('Transaction added to mempool:', txHash);
   }
 
   getBalanceOfAddress(address) {
@@ -260,26 +337,43 @@ class Blockchain {
     return txs;
   }
 
-  isChainValid() {
-    const realGenesis = JSON.stringify(this.createGenesisBlock());
+  isChainValid(chain) {
+    // For genesis block, compare transactions without caring about order
+    const genesisTransactions = this.chain[0].transactions;
+    const receivedGenesisTransactions = chain[0].transactions;
 
-    if (realGenesis !== JSON.stringify(this.chain[0])) {
+    // Check if genesis transactions match (regardless of order)
+    const genesisMatch = genesisTransactions.length === receivedGenesisTransactions.length &&
+      genesisTransactions.every(tx1 =>
+        receivedGenesisTransactions.some(tx2 =>
+          tx2.fromAddress === tx1.fromAddress &&
+          tx2.toAddress === tx1.toAddress &&
+          tx2.amount === tx1.amount
+        )
+      );
+
+    if (!genesisMatch) {
+      console.log("Genesis blocks don't match");
       return false;
     }
 
-    for (let i = 1; i < this.chain.length; i++) {
-      const currentBlock = this.chain[i];
-      const previousBlock = this.chain[i - 1];
+    // Rest of the chain validation
+    for (let i = 1; i < chain.length; i++) {
+      const currentBlock = chain[i];
+      const previousBlock = chain[i - 1];
 
       if (previousBlock.hash !== currentBlock.previousHash) {
+        console.log("Previous hash doesn't match");
         return false;
       }
 
       if (!currentBlock.hasValidTransactions()) {
+        console.log("Invalid transactions in block");
         return false;
       }
 
       if (currentBlock.hash !== currentBlock.calculateHash()) {
+        console.log("Block hash doesn't match");
         return false;
       }
     }

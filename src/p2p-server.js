@@ -5,9 +5,11 @@ const { Worker } = require('worker_threads');
 const { Blockchain, Transaction, Block } = require('./blockchain');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const PeerDiscovery = require('./peer-discovery');
+const { EventEmitter } = require('events');
 
 class P2PServer {
-  constructor(blockchain, port, walletId, delayed = false) {
+  constructor(blockchain, port, walletId, delayed = false, initialPeers = [5999, 6000]) {
     this.blockchain = blockchain;
     this.sockets = [];
     this.port = port;
@@ -16,6 +18,12 @@ class P2PServer {
     this.mining = false;
     this.worker = null; // Worker thread for mining
     this.delayed = delayed;
+    this.knownMessages = new Set(); // Initialize knownMessages as array
+    this.messageExpiry = 5 * 60 * 1000; // 5 minutes
+
+    this.peerDiscovery = new PeerDiscovery(port, initialPeers);
+    this.peerDiscovery.on('peer_connected', (socket) => this.connectSocket(socket));
+
     this.initCLI();
   }
 
@@ -23,7 +31,11 @@ class P2PServer {
     const server = new WebSocket.Server({ port: this.port });
     server.on('connection', socket => this.connectSocket(socket));
     console.log(`Listening on port: ${this.port}`);
+
+    this.peerDiscovery.start();
+
     this.startMining();
+    this.startChainVerification();
   }
 
   async startMining() {
@@ -34,10 +46,10 @@ class P2PServer {
 
   async mineLoop() {
     while (this.mining) {
-      if (this.blockchain.pendingTransactions.length > 0 || this.blockchain.pendingCalculations.length > 0) {
+      if (this.blockchain.mempool.transactions.size > 0 || this.blockchain.pendingCalculations.length > 0) {
         try {
           const blockData = this.blockchain.defineBlock(this.walletId, [], []);
-          this.blockchain.pendingTransactions = [];
+          this.blockchain.mempool.transactions = [];
 
           if (this.blockchain.pendingCalculations && this.blockchain.pendingCalculations.length > 0) {
             await new Promise(async (resolve, reject) => {
@@ -109,7 +121,7 @@ class P2PServer {
                 // Add the mined block to the blockchain
                 if (this.blockchain.addBlock(message.block)) {
                   this.broadcastBlock(message.block);
-                  this.blockchain.pendingTransactions = [];
+                  this.blockchain.mempool.transactions = [];
                 }
               } else if (message.status === 'aborted') {
                 console.log('Mining aborted due to a new block.');
@@ -146,7 +158,6 @@ class P2PServer {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
-
   sendChain(socket) {
     socket.send(JSON.stringify({
       type: 'chain',
@@ -176,6 +187,31 @@ class P2PServer {
     socket.on('message', message => {
       const data = JSON.parse(message);
 
+      // Handle peer exchange messages
+      if (data.type === 'peer_exchange') {
+        this.handlePeerExchange(data.peers);
+        return;
+      }
+
+      // Check if we've already processed this message
+      if (data.messageId && this.knownMessages.has(data.messageId)) {
+        return;
+      }
+
+      // Add message to known messages and set expiry
+      if (data.messageId) {
+        this.knownMessages.add(data.messageId);
+        setTimeout(() => {
+          this.knownMessages.delete(data.messageId);
+        }, this.messageExpiry);
+
+        // Propagate message to other peers
+        this.sockets.forEach(s => {
+          if (s !== socket && s.readyState === WebSocket.OPEN) {
+            s.send(message);
+          }
+        });
+      }
       switch (data.type) {
         case 'block':
           this.handleNewBlock(data.block);
@@ -192,14 +228,37 @@ class P2PServer {
         case 'pending_calculations':
           this.handlePendingCalculationsSync(data.pendingCalculations);
           break;
+        case 'chain_request':
+          this.handleChainRequest(socket);
+          break;
       }
     });
+  }
+
+  handlePeerExchange(peers) {
+    peers.forEach(peer => {
+      this.peerDiscovery.knownPeers.add(peer);
+      if (this.peerDiscovery.connectedPeers.size < this.peerDiscovery.maxPeers) {
+        this.peerDiscovery.connectToPeer(peer);
+      }
+    });
+  }
+  broadcastBlock(block) {
+    console.log("broadcasting block");
+    const messageId = `block_${block.hash}_${Date.now()}`;
+    const message = JSON.stringify({
+      type: 'block',
+      block,
+      messageId
+    });
+
+    this.knownMessages.add(messageId);
+    this.broadcast(message);
   }
 
   handleNewBlock(block) {
     console.log("Received new block", block);
     if (this.blockchain.addBlock(block)) {
-      console.log("Received new block, stopping current mining operation", this.mining, this.worker);
       if (this.mining && this.worker) {
         this.mining = false;  // Stop the mining loop
         this.worker.terminate();
@@ -226,13 +285,74 @@ class P2PServer {
     }
   }
 
-  handleChainSync(chain) {
-    console.log('Received chain');
-    if (chain.length > this.blockchain.chain.length && this.blockchain.isValidChain(chain)) {
-      this.blockchain.chain = chain;
+  handleChainRequest(socket) {
+    this.sendChain(socket);
+  }
+
+  sendChain(socket) {
+    socket.send(JSON.stringify({
+      type: 'chain',
+      chain: this.blockchain.chain
+    }));
+  }
+
+  requestLatestChain() {
+    const message = JSON.stringify({
+      type: 'chain_request',
+      messageId: `chain_request_${Date.now()}`
+    });
+
+    const availablePeers = this.sockets.filter(s => s.readyState === WebSocket.OPEN);
+    if (availablePeers.length > 0) {
+      const randomPeer = availablePeers[Math.floor(Math.random() * availablePeers.length)];
+      randomPeer.send(message);
     }
   }
 
+  startChainVerification() {
+    setInterval(() => {
+      this.requestLatestChain();
+    }, 5 * 60 * 1000);
+  }
+
+  handleChainSync(chain) {
+    console.log('Received chain of length:', chain.length);
+    console.log('Current chain length:', this.blockchain.chain.length);
+
+    if (chain.length > this.blockchain.chain.length) {
+      console.log('Received longer chain, validating...');
+
+      // Convert plain objects to Block instances
+      const reconstructedChain = chain.map(blockData => {
+        const transactions = blockData.transactions.map(tx => {
+          const transaction = new Transaction(tx.fromAddress, tx.toAddress, tx.amount);
+          transaction.timestamp = tx.timestamp;
+          transaction.signature = tx.signature;
+          return transaction;
+        });
+
+        const block = new Block(
+          blockData.timestamp,
+          transactions,
+          blockData.computationResults,
+          blockData.previousHash,
+          blockData.hash
+        );
+        block.nonce = blockData.nonce;
+        return block;
+      });
+
+      if (this.blockchain.isChainValid(reconstructedChain)) {
+        console.log('Chain is valid, updating local chain');
+        this.blockchain.chain = reconstructedChain;
+        console.log('Chain updated successfully');
+      } else {
+        console.log('Received chain is invalid');
+      }
+    } else {
+      console.log('Received chain is not longer than current chain');
+    }
+  }
   handleCalculationsSync(calculations) {
     console.log('Received calculations');
     const { pending, completed, temporary } = calculations;
@@ -253,20 +373,16 @@ class P2PServer {
     }
   }
 
-  broadcastBlock(block) {
-    console.log("Broadcasting block", block);
-    const message = JSON.stringify({
-      type: 'block',
-      block
-    });
-    this.broadcast(message);
-  }
-
   broadcastTransaction(transaction) {
+    console.log("broadcasting transaction");
+    const messageId = `tx_${transaction.calculateHash()}_${Date.now()}`;
     const message = JSON.stringify({
       type: 'transaction',
-      transaction
+      transaction,
+      messageId
     });
+
+    this.knownMessages.add(messageId);
     this.broadcast(message);
   }
 
