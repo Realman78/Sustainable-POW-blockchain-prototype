@@ -76,8 +76,9 @@ async function executeTask(task) {
 }
 
 parentPort.on('message', async (data) => {
-  console.log("Useful worker received data:", data);
+  console.log("Useful worker received data:", data, data.pendingCalculations);
   const { pendingCalculations } = data;
+
 
   try {
     console.log("Useful worker processing calculations:", pendingCalculations.length);
@@ -87,6 +88,8 @@ parentPort.on('message', async (data) => {
         console.log("Task execution cancelled");
         break;
       }
+
+      console.log("running task", task);
 
       const result = await executeTask(task);
       parentPort.postMessage(result);

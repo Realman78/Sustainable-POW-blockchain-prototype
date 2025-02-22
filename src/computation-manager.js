@@ -8,16 +8,33 @@ class ComputationManager {
     this.maxPendingTasks = options.maxPendingTasks || 100;
     this.taskTimeout = options.taskTimeout || 300000; // 5 minutes
     this.pendingTasks = new Map(); // taskId -> task
-    this.completedTasks = new Map(); // taskId -> result
     this.verifiers = new Map(); // taskType -> verification function
-    
+
     // Register built-in computation types
     this.registerTask('factorize', {
       verify: (task, result) => {
-        const factors = JSON.parse(result.output);
-        // Verify factors multiply to original number
-        const product = factors.reduce((a, b) => a * b, 1);
-        return product === parseInt(task.args);
+        try {
+          // Handle both array and string cases
+          const factors = Array.isArray(result.output)
+            ? result.output
+            : JSON.parse(result.output);
+
+          // Verify factors multiply to original number
+          const product = factors.reduce((a, b) => a * b, 1);
+          const expected = parseInt(task.args);
+
+          console.log("Verifying factorization:", {
+            factors,
+            product,
+            expected,
+            matches: product === expected
+          });
+
+          return product === expected;
+        } catch (error) {
+          console.log("Factorize verification error:", error);
+          return false;
+        }
       }
     });
   }
@@ -45,7 +62,6 @@ class ComputationManager {
       ...task,
       addedAt
     };
-    console.log('taskWithMeta :>> ', taskWithMeta);
 
     this.pendingTasks.set(task.taskId, taskWithMeta);
   }
@@ -54,7 +70,7 @@ class ComputationManager {
     try {
       const scriptPath = path.join(__dirname, 'computations', `${task.executable}.js`);
       const { stdout } = await execAsync(`node ${scriptPath} ${task.args}`);
-      
+
       return {
         taskId: task.taskId,
         output: stdout.trim(),
@@ -66,12 +82,19 @@ class ComputationManager {
   }
 
   verifyResult(task, result) {
-    const verifier = this.verifiers.get(task.executable);
-    if (!verifier) {
-      throw new Error(`No verifier found for task type: ${task.executable}`);
-    }
+    try {
+      const verifier = this.verifiers.get(task.executable);
+      if (!verifier) {
+        throw new Error(`No verifier found for task type: ${task.executable}`);
+      }
 
-    return verifier(task, result);
+      console.log("task and result", task, result);
+
+      return verifier(task, result);
+    } catch (error) {
+      console.log("Verification error:", error.message);
+      return false;
+    }
   }
 
   addCompletedTask(result) {
@@ -84,7 +107,6 @@ class ComputationManager {
       throw new Error('Result verification failed');
     }
 
-    this.completedTasks.set(result.taskId, result);
     this.pendingTasks.delete(result.taskId);
   }
 
@@ -108,13 +130,6 @@ class ComputationManager {
     return this.pendingTasks.has(taskId);
   }
 
-  isTaskCompleted(taskId) {
-    return this.completedTasks.has(taskId);
-  }
-
-  getCompletedTaskResult(taskId) {
-    return this.completedTasks.get(taskId);
-  }
 }
 
 module.exports = ComputationManager;

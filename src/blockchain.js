@@ -180,9 +180,6 @@ class Blockchain {
       this.chain.push(block);
       return true;
     }
-    for (const result of block.computationResults) {
-      this.computationManager.addCompletedTask(result);
-    }
     return false;
   }
   isValidBlock(blockData) {
@@ -263,17 +260,29 @@ class Blockchain {
     }
 
     for (const result of blockData.computationResults) {
-      const task = this.computationManager.pendingTasks.get(result.taskId);
-      if (!task) {
-        console.log("Unknown computation task");
-        return false;
-      }
+      // Reconstruct task from result data
+      const task = {
+          taskId: result.taskId,
+          executable: result.executable,
+          args: result.args
+      };
 
-      if (!this.computationManager.verifyResult(task, result)) {
-        console.log("Invalid computation result");
-        return false;
+      console.log('verification :>> ', result);
+  
+      try {
+          // Verify the computation without requiring it to be in pendingTasks
+          if (!this.computationManager.verifyResult(task, {
+              output: result.output,
+              executedAt: result.executedAt
+          })) {
+              console.log("Invalid computation result");
+              return false;
+          }
+      } catch (error) {
+          console.log("Computation verification failed:", error.message);
+          return false;
       }
-    }
+  }
 
     return true;
   }

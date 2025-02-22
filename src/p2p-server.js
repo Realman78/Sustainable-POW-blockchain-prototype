@@ -46,42 +46,69 @@ class P2PServer {
 
   async mineLoop() {
     while (this.mining) {
-      if (this.blockchain.mempool.transactions.size > 0) {
+      if (this.blockchain.mempool.transactions.size > 0 || this.blockchain.computationManager.pendingTasks.size > 0) {
         try {
           const blockData = this.blockchain.defineBlock(this.walletId, [], []);
+          let shouldMine = false;
 
-          if (this.blockchain.pendingCalculations && this.blockchain.pendingCalculations.length > 0) {
+          if (blockData.computationResults.length > 0) {
             await new Promise(async (resolve, reject) => {
-              console.log("Creating useful worker...");
+              console.log("Creating useful worker for block:", blockData);
               this.worker = new Worker('./src/useful-miner.js');
+
+              const cleanupWorker = () => {
+                if (this.worker) {
+                  try {
+                    this.worker.terminate();
+                  } catch (error) {
+                    console.error('Error terminating worker:', error);
+                  }
+                  this.worker = null;
+                }
+              };
 
               // Send the data to the worker
               this.worker.postMessage({
-                blockData,
-                pendingCalculations: this.blockchain.pendingCalculations,
+                pendingCalculations: blockData.computationResults,
               });
 
 
               this.worker.on('message', (message) => {
                 console.log("marinpari", message);
-                if (message.status === 'DONE' && message.taskId &&
-                  message.output) {
+                if (message.status === 'DONE' && message.taskId && message.output) {
                   console.log('Calculated successfully!', message.output);
-                  console.log('Calculated LARINPARIN!', { output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId) });
 
-                  blockData.computationResults.push({ output: message.output, ...this.blockchain.pendingCalculations.find(c => c.taskId === message.taskId) });
-                } else if (message.status === 'aborted') {
-                  console.log('Calculation aborted.');
+                  // Update the task with its result
+                  const solvedTask = blockData.computationResults.find(task => task.taskId === message.taskId);
+                  blockData.computationResults = blockData.computationResults.filter(task => task.taskId !== message.taskId);
+                  blockData.computationResults.push({
+                    taskId: message.taskId,
+                    output: message.output,
+                    executedAt: message.executedAt,
+                    executable: solvedTask.executable,
+                    args: solvedTask.args
+                  });
+
+                  // Update computation manager
+                  this.blockchain.computationManager.pendingTasks.delete(message.taskId);
+
+                  // Check if all tasks are completed
+                  const allTasksCompleted = blockData.computationResults.every(result => result.output !== undefined);
+                  if (allTasksCompleted) {
+                    shouldMine = true;
+                    cleanupWorker();
+                    resolve();
+                  }
+                } else if (message.status === 'ERROR') {
+                  console.log('Calculation aborted. Something went wrong.');
+                  cleanupWorker();
+                  resolve();
                 }
-                this.worker.terminate();
-                this.worker = null;
-                resolve();
               });
 
               this.worker.on('error', (error) => {
                 console.error('Worker error:', error);
-                this.worker.terminate();
-                this.worker = null;
+                cleanupWorker();
                 reject(error);
               });
 
@@ -91,14 +118,22 @@ class P2PServer {
                 resolve();
               });
             });
-
-            this.blockchain.pendingCalculations = [];
           }
 
-          if (this.blockchain.mempool.transactions.size > 0) {
+          if (shouldMine || this.blockchain.mempool.transactions.size > 0) {
             await new Promise((resolve, reject) => {
               console.log("Creating worker...");
               this.worker = new Worker('./src/miner.js');
+              const cleanupWorker = () => {
+                if (this.worker) {
+                  try {
+                    this.worker.terminate();
+                  } catch (error) {
+                    console.error('Error terminating mining worker:', error);
+                  }
+                  this.worker = null;
+                }
+              };
 
               // Send the data to the worker
               this.worker.postMessage({
@@ -110,7 +145,7 @@ class P2PServer {
 
               this.worker.on('message', (message) => {
                 if (message.status === 'mined') {
-                  console.log('Block mined successfully!', message.block);
+                  console.log('Block mined successfully!');
 
                   if (message.block.previousHash !== this.blockchain.getLatestBlock().hash) {
                     return reject(new Error('Block already mined'));
@@ -134,21 +169,20 @@ class P2PServer {
                 } else if (message.status === 'aborted') {
                   console.log('Mining aborted due to a new block.');
                 }
-                this.worker && this.worker.terminate();
-                this.worker = null;
+                cleanupWorker();
                 resolve();
               });
 
               this.worker.on('error', (error) => {
                 console.error('Worker error:', error);
-                this.worker.terminate();
-                this.worker = null;
+                cleanupWorker();
+
                 reject(error);
               });
 
               this.worker.on('exit', (code) => {
                 if (code !== 0) console.error(`Worker stopped with exit code ${code}`);
-                this.worker = null;
+                cleanupWorker();
                 resolve();
               });
             });
@@ -178,7 +212,6 @@ class P2PServer {
       type: 'calculations',
       calculations: {
         pending: Array.from(this.blockchain.computationManager.pendingTasks.values()),
-        completed: Array.from(this.blockchain.computationManager.completedTasks.values())
       }
     }));
   }
@@ -383,16 +416,10 @@ class P2PServer {
   }
   handleCalculationsSync(calculations) {
     console.log('Received calculations', calculations);
-    const { pending, completed } = calculations;
+    const { pending } = calculations;
     for (const task of pending) {
       if (!this.blockchain.computationManager.isTaskPending(task.taskId)) {
         this.blockchain.computationManager.addTask(task);
-      }
-    }
-    // Add completed tasks we don't have
-    for (const result of completed) {
-      if (!this.blockchain.computationManager.isTaskCompleted(result.taskId)) {
-        this.blockchain.computationManager.addCompletedTask(result);
       }
     }
   }
@@ -433,22 +460,15 @@ class P2PServer {
     });
   }
 
-  // broadcastCalculations() {
-  //   const message = JSON.stringify({
-  //     type: 'calculations',
-  //     calculations: {
-  //       pending: Array.from(this.blockchain.computationManager.pendingTasks.values()),
-  //       completed: Array.from(this.blockchain.computationManager.completedTasks.values())
-  //     }
-  //   });
-  //   this.broadcast(message);
-  // }
-
   broadcastPendingCalculations() {
+    const messageId = `calc_${Date.now()}`;  // Add messageId
     const message = JSON.stringify({
       type: 'pending_calculations',
-      pendingCalculations: Array.from(this.blockchain.computationManager.pendingTasks.values())
+      pendingCalculations: Array.from(this.blockchain.computationManager.pendingTasks.values()),
+      messageId  // Include messageId in message
     });
+
+    this.knownMessages.add(messageId);  // Add to known messages
     this.broadcast(message);
   }
 
@@ -479,6 +499,10 @@ class P2PServer {
               const amount = parseFloat(args[1]);
               if (isNaN(amount)) {
                 console.log('Error: amount must be a valid number.');
+                break;
+              }
+              if (address === this.walletId) {
+                console.log('Error: cannot send to own address.');
                 break;
               }
               this.handleSendCommand(address, amount);
