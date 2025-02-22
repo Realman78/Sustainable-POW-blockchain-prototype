@@ -167,11 +167,7 @@ class Blockchain {
       pendingTasks,
       this.getLatestBlock().hash
     );
-
-    // Don't remove transactions here!
-    // They should only be removed after successful mining and block addition
-    // The removal should happen in the mining loop after blockchain.addBlock() succeeds
-
+    
     return block;
   }
 
@@ -259,6 +255,7 @@ class Blockchain {
       return false;
     }
 
+    // 7. Verify computation results
     for (const result of blockData.computationResults) {
       // Reconstruct task from result data
       const task = {
@@ -266,8 +263,6 @@ class Blockchain {
           executable: result.executable,
           args: result.args
       };
-
-      console.log('verification :>> ', result);
   
       try {
           // Verify the computation without requiring it to be in pendingTasks

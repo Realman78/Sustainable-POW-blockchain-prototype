@@ -196,7 +196,6 @@ class P2PServer {
           console.error('Mining error:', error);
         }
       }
-      // Add a delay to avoid tight looping when no transactions are pending
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
@@ -314,7 +313,6 @@ class P2PServer {
 
           if (matchingTx) {
             const txHash = matchingTx.calculateHash();
-            console.log("Removing tx from mempool:", txHash, this.blockchain.mempool.transactions.has(txHash));
             this.blockchain.mempool.transactions.delete(txHash);
           }
         }
@@ -415,7 +413,6 @@ class P2PServer {
     }
   }
   handleCalculationsSync(calculations) {
-    console.log('Received calculations', calculations);
     const { pending } = calculations;
     for (const task of pending) {
       if (!this.blockchain.computationManager.isTaskPending(task.taskId)) {
@@ -425,9 +422,6 @@ class P2PServer {
   }
 
   handlePendingCalculationsSync(calculations) {
-    console.log('Received pending calculations', calculations);
-
-    // Add each received calculation if we don't already have it
     for (const task of calculations) {
       if (!this.blockchain.computationManager.isTaskPending(task.taskId)) {
         try {
@@ -440,7 +434,6 @@ class P2PServer {
   }
 
   broadcastTransaction(transaction) {
-    console.log("broadcasting transaction");
     const messageId = `tx_${transaction.calculateHash()}_${Date.now()}`;
     const message = JSON.stringify({
       type: 'transaction',
@@ -525,11 +518,9 @@ class P2PServer {
               break;
             case 'calcs':
               console.log(this.blockchain.computationManager);
-              // console.log(JSON.stringify(this.blockchain.completedCalculations, null, 2));
               break;
             case 'mempool':
               console.log(this.blockchain.mempool);
-              // console.log(JSON.stringify(this.blockchain.completedCalculations, null, 2));
               break;
 
             case 'compute':
