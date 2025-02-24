@@ -17,38 +17,53 @@ class Transaction {
   }
 
   calculateHash() {
+    const data = {
+      fromAddress: this.fromAddress || '',
+      toAddress: this.toAddress || '',
+      amount: this.amount || 0,
+      timestamp: this.timestamp || 0
+    };
+    
+    const dataString = JSON.stringify(data);
+    
     return crypto
       .createHash('sha256')
-      .update(
-        (this.fromAddress || '') + 
-        (this.toAddress || '') + 
-        (this.amount?.toString() || '0') + 
-        (this.timestamp?.toString() || Date.now().toString())
-      )
+      .update(dataString)
       .digest('hex');
   }
 
   sign(signingKey) {
-    // if (signingKey.getPublic('hex') !== this.fromAddress) {
-    //   throw new Error('You cannot sign transactions for other wallets!');
-    // }
-
-    // const hashTx = this.calculateHash();
-    // const sig = signingKey.sign(hashTx, 'base64');
-
-    this.signature = signingKey;
+    try {
+      const hash = this.calculateHash();
+      
+      const signature = signingKey.sign(hash);
+      this.signature = signature.toDER('hex');
+      
+      return true;
+    } catch (error) {
+      console.error("Error signing transaction:", error);
+      throw error;
+    }
   }
 
   isValid() {
     if (this.fromAddress === null) return true;
-
+    
     if (!this.signature || this.signature.length === 0) {
-      throw new Error('No signature in this transaction');
+      console.error("No signature in transaction");
+      return false;
     }
-
-    // const publicKey = ec.keyFromPublic(this.fromAddress, 'hex');
-    // return publicKey.verify(this.calculateHash(), this.signature);
-    return true;
+    
+    try {
+      const publicKey = ec.keyFromPublic(this.fromAddress, 'hex');
+      
+      const hash = this.calculateHash();      
+      const valid = publicKey.verify(hash, this.signature);
+      return valid;
+    } catch (error) {
+      console.error("Signature verification error:", error.message);
+      return false;
+    }
   }
 }
 
@@ -138,13 +153,18 @@ class Blockchain {
     this.computationManager.addTask(task);
   }
 
-  createGenesisBlock(initialWallets) {
-    const genesisTransactions = Object.entries(initialWallets).map(([wallet, amount]) =>
+  createGenesisBlock() {
+    const fixedInitialWallets = {
+      "048afd215dda3658a718f081cd4959f7f980a354c8ecf909da84852b7357d45a8174d6dacb1c3b7f7c1862455656db2962cdb44cb3f80a1c5ca70f199121b106d7": 1000,
+      "0460af0100961c074655e4617525da91c7f96e71253ff855faaccc49e07de3802212ce062aaa14461960367ce24eb26d62d2f225c9d7b5c48ed8799a9249b698ea": 1000,
+      "04888eada86b483e034f7064514ba8b04744ab53fc2324219c7baaeb2c9f32765de048f8bf1deb4e93e43ce817cd18f09e14a87ec55f9e42c26e3bc63d589b241a": 1000,
+    };
+  
+    const genesisTransactions = Object.entries(fixedInitialWallets).map(([wallet, amount]) =>
       new Transaction(null, wallet, parseInt(amount))
     );
     return new Block(Date.parse('2025-01-01'), genesisTransactions, [], '0', 'GENESIS_MARINCOIN');
   }
-
   getLatestBlock() {
     return this.chain[this.chain.length - 1];
   }
@@ -167,7 +187,7 @@ class Blockchain {
       pendingTasks,
       this.getLatestBlock().hash
     );
-    
+
     return block;
   }
 
@@ -259,25 +279,25 @@ class Blockchain {
     for (const result of blockData.computationResults) {
       // Reconstruct task from result data
       const task = {
-          taskId: result.taskId,
-          executable: result.executable,
-          args: result.args
+        taskId: result.taskId,
+        executable: result.executable,
+        args: result.args
       };
-  
+
       try {
-          // Verify the computation without requiring it to be in pendingTasks
-          if (!this.computationManager.verifyResult(task, {
-              output: result.output,
-              executedAt: result.executedAt
-          })) {
-              console.log("Invalid computation result");
-              return false;
-          }
-      } catch (error) {
-          console.log("Computation verification failed:", error.message);
+        // Verify the computation without requiring it to be in pendingTasks
+        if (!this.computationManager.verifyResult(task, {
+          output: result.output,
+          executedAt: result.executedAt
+        })) {
+          console.log("Invalid computation result");
           return false;
+        }
+      } catch (error) {
+        console.log("Computation verification failed:", error.message);
+        return false;
       }
-  }
+    }
 
     return true;
   }

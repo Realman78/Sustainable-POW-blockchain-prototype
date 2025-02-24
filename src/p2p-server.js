@@ -2,19 +2,18 @@ const WebSocket = require('ws');
 const readline = require('readline');
 const EC = require('elliptic').ec;
 const { Worker } = require('worker_threads');
-const { Blockchain, Transaction, Block } = require('./blockchain');
-const path = require('path');
+const { Transaction, Block } = require('./blockchain');
 const { v4: uuidv4 } = require('uuid');
 const PeerDiscovery = require('./peer-discovery');
-const { EventEmitter } = require('events');
+const ec = new EC('secp256k1');
 
 class P2PServer {
   constructor(blockchain, port, walletId, delayed = false, initialPeers = [5999, 6000]) {
     this.blockchain = blockchain;
     this.sockets = [];
     this.port = port;
-    this.walletId = walletId;
-    this.key = walletId + 'key';
+    this.key = ec.keyFromPrivate(walletId);
+    this.walletId = this.key.getPublic('hex')
     this.mining = false;
     this.worker = null; // Worker thread for mining
     this.delayed = delayed;
@@ -337,6 +336,7 @@ class P2PServer {
         transaction.toAddress,
         transaction.amount
       );
+      tx.timestamp = transaction.timestamp;
       tx.signature = transaction.signature;
       this.blockchain.addTransactionToMempool(tx, tx.timestamp);
     } catch (e) {
@@ -434,13 +434,21 @@ class P2PServer {
   }
 
   broadcastTransaction(transaction) {
-    const messageId = `tx_${transaction.calculateHash()}_${Date.now()}`;
+    const transactionData = {
+      fromAddress: transaction.fromAddress,
+      toAddress: transaction.toAddress,
+      amount: transaction.amount,
+      timestamp: transaction.timestamp,
+      signature: transaction.signature
+    };
+    
+    const messageId = `tx_${transaction.calculateHash()}_${transaction.timestamp}`;
     const message = JSON.stringify({
       type: 'transaction',
-      transaction,
+      transaction: transactionData,
       messageId
     });
-
+    
     this.knownMessages.add(messageId);
     this.broadcast(message);
   }
@@ -523,6 +531,10 @@ class P2PServer {
               console.log(this.blockchain.mempool);
               break;
 
+            case "address":
+              console.log(this.walletId);
+              break;
+
             case 'compute':
               if (args.length < 1) {
                 console.log('Error: compute command requires a file name and optional arguments.');
@@ -552,15 +564,46 @@ class P2PServer {
 
 
   handleSendCommand(toAddress, amount) {
-    const tx = new Transaction(this.walletId, toAddress, amount);
-    tx.sign(this.key);
-    this.blockchain.addTransactionToMempool(tx);
-    this.broadcastTransaction(tx);
+    try {
+      let recipientPublicKey = toAddress;
+      
+      if (toAddress.length < 64 && !/^[0-9a-f]+$/i.test(toAddress)) {
+        try {
+          const WalletManager = require('./wallet-manager');
+          const walletManager = new WalletManager();
+          const recipientWallet = walletManager.loadWallet(toAddress);
+          recipientPublicKey = recipientWallet.publicKey;
+          console.log(`Resolved wallet name ${toAddress} to public key: ${recipientPublicKey}`);
+        } catch (error) {
+          console.error(`Could not resolve wallet name ${toAddress}: ${error.message}`);
+          return;
+        }
+      }
+      
+      const tx = new Transaction(this.walletId, recipientPublicKey, amount);
+      
+      tx.sign(this.key);
+      this.blockchain.addTransactionToMempool(tx);
+      this.broadcastTransaction(tx);
+    } catch (error) {
+      console.error('Error sending transaction:', error.message);
+    }
   }
 
   connectToPeer(port) {
-    const socket = new WebSocket("ws://localhost:" + port);
-    socket.on('open', () => this.connectSocket(socket));
+    try {
+      const socket = new WebSocket("ws://localhost:" + port);
+      socket.on('open', () => {
+        try {
+          this.connectSocket(socket)
+        } catch (error) {
+          console.error('Error connecting to peer:', error);
+        }
+      });
+      socket.on('error', (error) => { console.error('Error connecting to peer:', error); });
+    } catch (error) {
+      console.error('Error connecting to peer:', error);
+    }
   }
 }
 
